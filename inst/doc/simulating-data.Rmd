@@ -1,0 +1,208 @@
+---
+title: "Simulating Multivariate Data with `holodeck`"
+author: "Eric R. Scott"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Simulating Multivariate Data with holodeck}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+To simulate co-varying multivariate normal data one can use the `mvrnorm()` function from the `MASS` package. However, this requires input of a covariance matrix and returns a matrix.  The `holodeck` package provides functions that are "tidy" in the sense that they work with dataframes and the pipe operator (`%>%`). It also includes some functions that provide an interface between the Bioconductor package `ropls` and the tidyverse.
+
+# Packages
+
+```{r message=FALSE, warning=FALSE}
+library(holodeck)
+library(dplyr)
+library(purrr)
+library(ropls)
+library(iheatmapr)
+library(mice)
+```
+
+
+# Simulating data with `sim_*()`
+
+`holodeck` provides functions to simulate different kinds of data as columns in a tibble:
+
+- `sim_cat()` for categorical variables
+- `sim_covar()` for multivariate normal numeric data
+- `sim_discr()` for multivariate normal data with different means for levels of some grouping variable
+- `sim_missing()` for randomly introducing `NA`s
+
+To simulate multivariate data you need to start with a dataframe or a tibble.  Once you have a dataframe or tibble, the `sim_*()` functions add columns onto it.
+
+```{r}
+df <- tibble(Y = rep(c("a", "b"), each = 5))
+
+df %>% sim_covar(n_vars = 5, var = 1, cov = 0.5)
+```
+
+Optionally you can create a tibble with the `sim_covar()` or `sim_cat()` functions by providing them with the `N`  argument instead of `.data`.
+
+```{r}
+sim_covar(n_obs = 10, n_vars = 5, var = 1, cov = 0.5)
+```
+
+`sim_cat()` is a rather simple wrapper that just creates a column of categorical data. Eventually, it will be expanded to allow creation of crossed and nested factors.
+
+```{r}
+sim_cat(n_obs = 10, n_groups = 2)
+```
+
+`sim_discr()` simulates covarying data that differs in means between levels of some grouping variable.
+
+```{r}
+df %>%
+  group_by(Y) %>% 
+  sim_discr(n_vars = 5, var = 1, cov = 0.1, group_means = c(1, -1))
+```
+
+
+# Chaining functions with `%>%`
+
+One advantage of the `holodeck` package is the ability to chain functions together to create complex data covariance structures. You can chain functions together in any order, although the `sim_discr()` function requires a grouping variable.
+
+All of the `sim_*` functions (besides `sim_missing()`) take an optional name argument which names the variables created.
+
+```{r}
+df <-
+  sim_covar(n_obs = 20, n_vars = 5, var = 1, cov = 0.1, name = "low") %>% #5 variables with low covariance
+  sim_covar(n_vars = 5, var = 1, cov = 0.8, name = "high")            #5 variables with high covariance
+```
+
+Now we could add a categorical variable, and some variables that discriminate between levels of our categorical variable
+
+```{r}
+df1 <-
+  df %>% 
+  sim_cat(n_groups = 2, name = "factor") %>% 
+  group_by(factor) %>% 
+  sim_discr(n_vars = 5, var = 1, cov = 0.1, group_means = c(-1, 1), name = "discr") %>% 
+  ungroup()
+```
+
+Finally, if you want to simulate missing values, you can use `sim_missing()` to randomly introduce NAs.
+
+```{r}
+df2 <-
+  df1 %>% 
+  sim_missing(prop = 0.1)
+df2
+```
+
+# Visualizing covariance
+
+`cov()` creates a covariance matrix with variance on the diagonal.  We can visualize it as a heatmap.
+
+```{r fig.width=6, fig.height=5}
+df1 %>%
+  select(-factor) %>% 
+  cov() %>% 
+  iheatmap(row_labels = TRUE, col_labels = TRUE, name = "cov or var")
+```
+
+Values are higher for the discriminating variables because the `cov` and `var` arguments to `sim_discr()` only control the covariance and variance *within* groups.
+
+
+## Example: Effect of missing data
+
+One reason to simulate multivariate data is to test the effects of different properties of datasets on analysis results.  For example, what's the effect of missing data on a statistical analysis? The `sim_missing()` function replaces a proportion of values with NA.  Let's see how it affects a PLS-DA analysis.
+
+### Create datasets
+
+We can chain several `sim_*` functions to quickly create a dataframe.
+
+```{r}
+df2 <- 
+  sim_cat(n_obs = 40, n_groups = 3, name = "factor") %>% 
+  sim_covar(n_vars = 3, var = 1, cov = 0.0, name = "noise") %>% 
+  group_by(factor) %>% 
+  sim_discr(n_vars = 5, var = 1, cov = 0, group_means = c(-1, 0, 1), name  = "signal") %>%
+  sim_discr(n_vars = 5, var = 1, cov = 0, group_means = c(0, 0.5, 1), name = "signal2") %>% 
+  ungroup()
+df2
+```
+
+We can then use `map()` from the `purrr` package to create many randomly generated datasets using the same specifications, with and without missing values.
+
+```{r}
+set.seed(100)
+dfs <-
+  map(1:20, 
+      ~sim_cat(n_obs = 40, n_groups = 3, name = "factor") %>% 
+        sim_covar(n_vars = 3, var = 1, cov = 0.0, name = "noise") %>% 
+        group_by(factor) %>% 
+        sim_discr(n_vars = 5, var = 1, cov = 0, group_means = c(-1, 0, 1), name  = "signal") %>%
+        sim_discr(n_vars = 5, var = 1, cov = 0, group_means = c(0, 0.5, 1), name = "signal2") %>% 
+        ungroup())
+```
+
+Alternatively, you could generate one large dataframe (many rows) and take subsets.  Either way, you know the "true" properties of the data and can compare to the results of the analyses you test.
+
+### Simulate missing data
+
+We can now map the `sim_missing()` function to randomly introduce NAs to the datasets.
+
+```{r}
+set.seed(101)
+dfs.missing <-
+  map(dfs, ~sim_missing(., prop = 0.05))
+```
+
+And finally, deal with those NAs with multiple imputation with the `mice` package.
+
+```{r warning=FALSE}
+# this might take a few seconds
+dfs.imputed <-
+  map(dfs.missing, ~mice(., printFlag = FALSE) %>% complete())
+```
+
+Here, we can compare an example dataset as original, with NAs, and imputed:
+
+```{r}
+head(dfs[[1]])
+head(dfs.missing[[1]])
+head(dfs.imputed[[1]])
+```
+
+### Analyze
+
+PLS-DA can actually handle data with missing values as it does it's own imputation internally (however, it is quite slow).  We might still want to compare the results of data with and without missing values and with pre-imputed values.
+
+```{r}
+my_opls<- partial(opls, predI = 2, permI = 1, printL = FALSE, plotL = FALSE)
+plsda.q2 <- 
+  map_dbl(dfs,
+      ~my_opls(select(., -factor), .$factor) %>%
+        getSummaryDF() %>% .$`Q2(cum)`)
+
+missing.q2 <-
+  map_dbl(dfs.missing,
+      ~my_opls(select(., -factor), .$factor) %>%
+        getSummaryDF() %>% .$`Q2(cum)`)
+
+imputed.q2 <- 
+  map_dbl(dfs.imputed,
+      ~my_opls(select(., -factor), .$factor) %>%
+        getSummaryDF() %>% .$`Q2(cum)`)
+```
+
+```{r}
+tibble(plsda.q2, missing.q2, imputed.q2) %>% 
+  mutate(missing.q2.diff = plsda.q2 - missing.q2,
+         imputed.q2.diff = plsda.q2 - imputed.q2) %>% 
+  summarize_all(mean, na.rm = TRUE)
+```
+
+It looks like, on average in this sample, the imputation by `mice` did slightly worse than the imputation done by `ropls`, at least with respect to the $Q^2$ statistic.
